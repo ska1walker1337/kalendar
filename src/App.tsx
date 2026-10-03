@@ -1,17 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { format, startOfDay } from 'date-fns';
 import { ru } from 'date-fns/locale';
 import { Task, SortBy } from './types';
-import { loadTasks, saveTasks } from './utils';
 import { Calendar } from './components/Calendar';
 import { DayScheduleView } from './components/DaySchedule';
 import { TaskModal } from './components/TaskModal';
 import { TaskList } from './components/TaskList';
 import { InstallBanner } from './components/InstallBanner';
+import { SettingsPage } from './components/SettingsPage';
+import { AuthPage } from './components/AuthPage';
 import { useInstallPrompt } from './hooks/useInstallPrompt';
+import { useAuth, AuthProvider } from './context/AuthContext';
+import { isSupabaseConfigured, signOut } from './lib/supabase';
 
-function App() {
-  const [tasks, setTasks] = useState<Task[]>(loadTasks);
+function AppContent() {
+  const { user, loading, tasks, addTask, editTask, removeTask, isCloud } = useAuth();
   const [selectedDate, setSelectedDate] = useState<Date>(startOfDay(new Date()));
   const [currentMonth, setCurrentMonth] = useState<Date>(new Date());
   const [modalOpen, setModalOpen] = useState(false);
@@ -19,11 +22,13 @@ function App() {
   const [defaultHour, setDefaultHour] = useState<number>(7);
   const [sortBy, setSortBy] = useState<SortBy>('priority');
   const [activeTab, setActiveTab] = useState<'schedule' | 'tasks'>('schedule');
+  const [showSettings, setShowSettings] = useState(false);
+  const [showAuth, setShowAuth] = useState(false);
   const { isInstallable, isInstalled, install } = useInstallPrompt();
 
-  useEffect(() => {
-    saveTasks(tasks);
-  }, [tasks]);
+  const todayStr = format(startOfDay(new Date()), 'yyyy-MM-dd');
+  const todayTasks = tasks.filter(t => t.date === todayStr);
+  const completedToday = todayTasks.filter(t => t.completed).length;
 
   const handleAddTask = (hour: number) => {
     setEditingTask(null);
@@ -37,33 +42,55 @@ function App() {
     setModalOpen(true);
   };
 
-  const handleSaveTask = (task: Task) => {
-    setTasks(prev => {
-      const existing = prev.findIndex(t => t.id === task.id);
-      if (existing >= 0) {
-        const updated = [...prev];
-        updated[existing] = task;
-        return updated;
-      }
-      return [...prev, task];
-    });
+  const handleSaveTask = async (task: Task) => {
+    const existing = tasks.find(t => t.id === task.id);
+    if (existing) {
+      await editTask(task.id, task);
+    } else {
+      await addTask(task);
+    }
   };
 
-  const handleToggleTask = (id: string) => {
-    setTasks(prev => prev.map(t => t.id === id ? { ...t, completed: !t.completed } : t));
+  const handleToggleTask = async (id: string) => {
+    const task = tasks.find(t => t.id === id);
+    if (task) {
+      await editTask(id, { completed: !task.completed });
+    }
   };
 
-  const handleDeleteTask = (id: string) => {
-    setTasks(prev => prev.filter(t => t.id !== id));
+  const handleDeleteTask = async (id: string) => {
+    await removeTask(id);
   };
 
-  const todayStr = format(startOfDay(new Date()), 'yyyy-MM-dd');
-  const todayTasks = tasks.filter(t => t.date === todayStr);
-  const completedToday = todayTasks.filter(t => t.completed).length;
+  const handleLogout = async () => {
+    if (confirm('Выйти из аккаунта?')) {
+      await signOut();
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
+        <div className="text-center">
+          <div className="text-4xl mb-4 animate-pulse">📅</div>
+          <p className="text-gray-400">Загрузка...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Show auth page if Supabase configured but not logged in
+  if (isSupabaseConfigured() && !user && showAuth) {
+    return (
+      <AuthPage
+        onSuccess={() => setShowAuth(false)}
+        onBack={() => setShowAuth(false)}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-900 text-white">
-      {/* Background gradient */}
       <div className="fixed inset-0 bg-gradient-to-br from-gray-900 via-gray-900 to-blue-900/20 pointer-events-none" />
       
       <div className="relative z-10 max-w-7xl mx-auto p-3 sm:p-4 lg:p-6">
@@ -78,19 +105,81 @@ function App() {
                 Юрист • Борец • Трейдер • Программист
               </p>
             </div>
-            <div className="text-right hidden sm:block">
-              <div className="text-sm text-gray-300">
-                {format(new Date(), 'd MMMM yyyy', { locale: ru })}
+            <div className="flex items-center gap-2">
+              {/* Cloud status */}
+              <div className={`hidden sm:flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs ${
+                isCloud ? 'bg-green-500/10 text-green-300 border border-green-500/30' : 'bg-gray-700/50 text-gray-400 border border-gray-600'
+              }`}>
+                <span>{isCloud ? '☁️' : '💾'}</span>
+                <span>{isCloud ? 'Облако' : 'Локально'}</span>
               </div>
-              <div className="text-xs text-gray-500 mt-1">
-                {todayTasks.length} задач | {completedToday} ✅
-              </div>
+
+              {/* Settings button */}
+              <button
+                onClick={() => setShowSettings(true)}
+                className="p-2 hover:bg-gray-700 rounded-lg transition-colors text-gray-400 hover:text-white"
+                title="Настройки"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+              </button>
+
+              {/* User / Login button */}
+              {user ? (
+                <button
+                  onClick={handleLogout}
+                  className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-gray-700/50 hover:bg-gray-600/50 rounded-lg text-xs text-gray-300 transition-colors border border-gray-600"
+                  title={user.email || 'Выйти'}
+                >
+                  <span className="w-5 h-5 bg-blue-500 rounded-full flex items-center justify-center text-[10px] font-bold text-white">
+                    {(user.email || '?')[0].toUpperCase()}
+                  </span>
+                  <span className="max-w-[100px] truncate">{user.email}</span>
+                </button>
+              ) : isSupabaseConfigured() ? (
+                <button
+                  onClick={() => setShowAuth(true)}
+                  className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 rounded-lg text-xs text-blue-300 transition-colors border border-blue-500/30"
+                >
+                  Войти
+                </button>
+              ) : null}
             </div>
           </div>
         </header>
 
         {/* Install Banner */}
         <InstallBanner isInstallable={isInstallable} isInstalled={isInstalled} onInstall={install} />
+
+        {/* Mobile user bar */}
+        <div className="sm:hidden flex items-center justify-between mb-3 gap-2">
+          <div className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs ${
+            isCloud ? 'bg-green-500/10 text-green-300 border border-green-500/30' : 'bg-gray-700/50 text-gray-400 border border-gray-600'
+          }`}>
+            <span>{isCloud ? '☁️' : '💾'}</span>
+            <span>{isCloud ? 'Облако' : 'Локально'}</span>
+          </div>
+          {user ? (
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1.5 px-2 py-1 bg-gray-700/50 rounded-lg text-xs text-gray-300 border border-gray-600"
+            >
+              <span className="w-4 h-4 bg-blue-500 rounded-full flex items-center justify-center text-[8px] font-bold text-white">
+                {(user.email || '?')[0].toUpperCase()}
+              </span>
+              <span className="max-w-[120px] truncate">{user.email}</span>
+            </button>
+          ) : isSupabaseConfigured() ? (
+            <button
+              onClick={() => setShowAuth(true)}
+              className="px-3 py-1 bg-blue-600/20 rounded-lg text-xs text-blue-300 border border-blue-500/30"
+            >
+              Войти
+            </button>
+          ) : null}
+        </div>
 
         {/* Main Layout */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-6">
@@ -139,16 +228,21 @@ function App() {
               </div>
             </div>
 
-            {/* How to use on phone */}
-            <div className="mt-4 bg-gray-800/50 rounded-xl p-4 border border-gray-700/50">
-              <h4 className="text-sm font-medium text-gray-300 mb-2">📱 Как пользоваться на телефоне</h4>
-              <div className="space-y-2 text-xs text-gray-400">
-                <p>1. Открой этот сайт в браузере телефона</p>
-                <p>2. Нажми "Поделиться" (iOS) или ⋮ меню (Android)</p>
-                <p>3. Выбери "На экран Домой" / "Добавить на главный экран"</p>
-                <p>4. Готово! Приложение работает как обычное, даже офлайн</p>
+            {/* Sync info */}
+            {!isCloud && (
+              <div className="mt-4 bg-blue-500/5 border border-blue-500/20 rounded-xl p-4">
+                <h4 className="text-sm font-medium text-blue-300 mb-2">🔄 Синхронизация</h4>
+                <p className="text-xs text-gray-400 mb-3">
+                  Настрой Supabase чтобы задачи синхронизировались между телефоном и компьютером!
+                </p>
+                <button
+                  onClick={() => setShowSettings(true)}
+                  className="w-full py-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 text-xs font-medium rounded-lg transition-colors border border-blue-500/30"
+                >
+                  Настроить облако
+                </button>
               </div>
-            </div>
+            )}
           </div>
 
           {/* Right: Schedule / Tasks */}
@@ -204,6 +298,22 @@ function App() {
         </div>
       </div>
 
+      {/* Settings Modal */}
+      {showSettings && (
+        <SettingsPage
+          onClose={() => setShowSettings(false)}
+          onConfigChange={() => { setShowSettings(false); window.location.reload(); }}
+        />
+      )}
+
+      {/* Auth Modal */}
+      {showAuth && isSupabaseConfigured() && (
+        <AuthPage
+          onSuccess={() => setShowAuth(false)}
+          onBack={() => setShowAuth(false)}
+        />
+      )}
+
       {/* Task Modal */}
       <TaskModal
         isOpen={modalOpen}
@@ -214,6 +324,14 @@ function App() {
         defaultHour={defaultHour}
       />
     </div>
+  );
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 }
 

@@ -1,5 +1,6 @@
 export interface Task {
   id: string;
+  user_id?: string; // для Supabase
   title: string;
   description: string;
   date: string; // YYYY-MM-DD
